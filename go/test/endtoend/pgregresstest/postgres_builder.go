@@ -414,7 +414,7 @@ func (pb *PostgresBuilder) RunContribTests(t *testing.T, ctx context.Context, mo
 // ExternalModules returns the external extensions to test, defaulting to the
 // covered set (CoveredExternalExtensions). PGEXTERNAL_TESTS (space-separated
 // catalog names, e.g. "vector") selects a subset for local iteration.
-func ExternalModules() []ExternalExtension {
+func ExternalModules() []pgbuilder.ExtSpec {
 	all := CoveredExternalExtensions()
 	sel := strings.Fields(os.Getenv("PGEXTERNAL_TESTS"))
 	if len(sel) == 0 {
@@ -424,7 +424,7 @@ func ExternalModules() []ExternalExtension {
 	for _, s := range sel {
 		want[s] = true
 	}
-	var out []ExternalExtension
+	var out []pgbuilder.ExtSpec
 	for _, e := range all {
 		if want[e.Name] {
 			out = append(out, e)
@@ -472,7 +472,7 @@ func listRegressTests(testDir string) []string {
 // each one we reset the public schema directly on the primary (directPgPort,
 // bypassing the gateway's DDL block) to clear objects a prior extension left
 // behind; pg_regress's --load-extension re-creates the extension per test.
-func (pb *PostgresBuilder) RunExternalTests(t *testing.T, ctx context.Context, exts []ExternalExtension, multigatewayPort, directPgPort int, password string) (*TestResults, error) {
+func (pb *PostgresBuilder) RunExternalTests(t *testing.T, ctx context.Context, exts []pgbuilder.ExtSpec, multigatewayPort, directPgPort int, password string) (*TestResults, error) {
 	t.Helper()
 
 	// Ensure the pg_regress we drive directly is built (a contrib/regression run
@@ -495,8 +495,13 @@ func (pb *PostgresBuilder) RunExternalTests(t *testing.T, ctx context.Context, e
 	for _, ext := range exts {
 		cloneDir := filepath.Join(pb.ExternalDir, ext.Name)
 		testDir := filepath.Join(cloneDir, "test")
+		// PostGIS ships no PGXS test/sql layout; use an in-repo curated suite when present.
+		if repoSuite := externalSuiteDir(ext.Name); suiteutil.FileExists(filepath.Join(repoSuite, "sql")) &&
+			suiteutil.FileExists(filepath.Join(repoSuite, "expected")) {
+			testDir = repoSuite
+		}
 		if !suiteutil.FileExists(filepath.Join(testDir, "sql")) {
-			t.Logf("external/%s: no test/sql in checkout, skipping", ext.Name)
+			t.Logf("external/%s: no test/sql in checkout or in-repo suite, skipping", ext.Name)
 			continue
 		}
 
@@ -842,6 +847,15 @@ func pgMajorDir() string {
 	// Unknown version: fall back to pg17 and let the test fail if patches
 	// are missing.
 	return "pg17"
+}
+
+// externalSuiteDir returns the in-repo curated suite dir for an external
+// extension (testdata/pg<major>/external/<name>); the path may not exist, so
+// callers check.
+func externalSuiteDir(name string) string {
+	_, file, _, _ := runtime.Caller(0)
+	pkgDir := filepath.Dir(file)
+	return filepath.Join(pkgDir, "testdata", pgMajorDir(), "external", name)
 }
 
 // findRepoRoot walks up from this source file until it finds a directory

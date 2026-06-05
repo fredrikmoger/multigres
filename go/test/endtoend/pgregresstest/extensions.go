@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/multigres/multigres/go/test/endtoend/pgbuilder"
 )
 
 // ExtKind is where an extension's code lives.
@@ -101,8 +103,8 @@ var ExtensionCatalog = []ExtensionInfo{
 	{"pgtap", KindExternal, StatusExternal, ""},
 	{"plpgsql", KindContrib, StatusUnsupported, "built-in PL; exercised by the core regression suite, not contrib"},
 	{"plpgsql_check", KindExternal, StatusExternal, ""},
-	{"postgis", KindExternal, StatusExternal, ""},
-	{"postgis_topology", KindExternal, StatusExternal, "PostGIS"},
+	{"postgis", KindExternal, StatusCovered, "autotools build (externalSpecs); curated spatial suite + go/test/endtoend/postgis"},
+	{"postgis_topology", KindExternal, StatusExternal, "PostGIS; installed by the postgis build, suite pending"},
 	{"postgres_fdw", KindContrib, StatusUnsupported, "pooler blocks CREATE SERVER / outbound connections"},
 	{"supabase_vault", KindExternal, StatusExternal, ""},
 	{"unaccent", KindContrib, StatusCovered, ""},
@@ -111,22 +113,20 @@ var ExtensionCatalog = []ExtensionInfo{
 	{"wrappers", KindExternal, StatusExternal, "Rust"},
 }
 
-// ExternalExtension describes one external (non-contrib) extension wired into
-// the external suite: its catalog name plus the git coordinates the harness
-// clones and builds it from.
-type ExternalExtension struct {
-	Name string
-	Repo string
-	Tag  string
-}
-
-// externalSpecs holds the build coordinates (git repo + pinned tag) for every
-// external extension the harness can build. An ExtensionCatalog entry with
-// Kind==KindExternal can only be StatusCovered if it also has a spec here; the
-// pinned tag keeps the suite reproducible (and matches the pgvector ABI the
-// from-source PostgreSQL was built against). Keyed by catalog Name.
-var externalSpecs = map[string]ExternalExtension{
+// externalSpecs holds the build coordinates for every external extension the
+// harness can build. A KindExternal catalog entry can only be StatusCovered if
+// it also has a spec here; the pinned tag keeps the suite reproducible. Keyed by
+// catalog Name.
+var externalSpecs = map[string]pgbuilder.ExtSpec{
 	"vector": {Name: "vector", Repo: "https://github.com/pgvector/pgvector", Tag: "v0.8.1"},
+	"postgis": {
+		Name:          "postgis",
+		Repo:          "https://github.com/postgis/postgis",
+		Tag:           "3.4.3",
+		Build:         pgbuilder.ExtBuildAutotools,
+		Bootstrap:     [][]string{{"./autogen.sh"}},
+		ConfigureArgs: []string{"--without-raster", "--without-protobuf"},
+	},
 }
 
 // CoveredExternalExtensions returns the external extensions the suite builds and
@@ -134,8 +134,8 @@ var externalSpecs = map[string]ExternalExtension{
 // joined with its build spec. An entry marked covered without a matching spec is
 // a configuration error and is skipped (CheckExternalSpecs surfaces it as a
 // hard failure so it can't silently drop coverage).
-func CoveredExternalExtensions() []ExternalExtension {
-	var exts []ExternalExtension
+func CoveredExternalExtensions() []pgbuilder.ExtSpec {
+	var exts []pgbuilder.ExtSpec
 	for _, e := range ExtensionCatalog {
 		if e.Kind == KindExternal && e.Status == StatusCovered {
 			if spec, ok := externalSpecs[e.Name]; ok {

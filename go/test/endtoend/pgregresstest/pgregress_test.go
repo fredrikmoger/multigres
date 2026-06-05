@@ -157,7 +157,7 @@ func TestPostgreSQLRegression(t *testing.T) {
 	if runExternal {
 		t.Logf("Phase 2d: Installing external extensions...")
 		for _, ext := range CoveredExternalExtensions() {
-			if _, err := builder.InstallExternalExtension(t, buildCtx, ext.Name, ext.Repo, ext.Tag); err != nil {
+			if _, err := builder.InstallExternalExtension(t, buildCtx, ext); err != nil {
 				t.Fatalf("Failed to install external extension %s: %v", ext.Name, err)
 			}
 		}

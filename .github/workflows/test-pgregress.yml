@@ -61,7 +61,9 @@ jobs:
           # uuid-dev (libuuid / e2fs) is required for ./configure --with-uuid (uuid-ossp);
           # libssl-dev is required for ./configure --with-ssl=openssl (pgcrypto, PG16+).
           # Both are enabled only when the contrib extension suite runs.
-          sudo apt-get install -y build-essential bison flex libreadline-dev zlib1g-dev uuid-dev libssl-dev
+          # autoconf/pkg-config + GEOS/PROJ/libxml2/json-c build PostGIS from source (raster/protobuf disabled → no GDAL/protobuf-c).
+          sudo apt-get install -y build-essential bison flex libreadline-dev zlib1g-dev uuid-dev libssl-dev \
+            autoconf pkg-config libgeos-dev libproj-dev libxml2-dev libjson-c-dev
 
       - name: Build
         run: make build
