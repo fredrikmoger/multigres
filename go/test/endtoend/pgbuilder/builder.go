@@ -238,57 +238,136 @@ func (b *Builder) InstallContrib(t *testing.T, ctx context.Context) error {
 	return nil
 }
 
-// InstallExternalExtension clones an external extension's repo at a pinned tag
-// into b.ExternalDir/<name>, builds it as a PGXS module against this builder's
-// from-source PostgreSQL, and installs it into b.InstallDir. It returns the
-// checkout directory so the caller can drive the extension's shipped pg_regress
-// suite (sql/ + expected/) from there. Must be called after Build().
-//
-// The build is pointed at the per-run install tree via PG_CONFIG so the
-// extension's .so links against the exact PostgreSQL the cluster runs (the same
-// ABI-consistency guarantee Build provides for regress.so). The checkout is
-// per-run, so a shallow clone happens once per invocation; pinning the tag keeps
-// the suite reproducible.
-func (b *Builder) InstallExternalExtension(t *testing.T, ctx context.Context, name, repo, tag string) (string, error) {
+// ExtBuildSystem selects how an external extension's source tree is compiled.
+type ExtBuildSystem int
+
+const (
+	// ExtBuildPGXS: `make PG_CONFIG=...` then `make install` (e.g. pgvector). Zero value.
+	ExtBuildPGXS ExtBuildSystem = iota
+	// ExtBuildAutotools: Bootstrap, then ./configure --with-pgconfig, make, make install (e.g. PostGIS).
+	ExtBuildAutotools
+)
+
+// ExtSpec describes how to fetch and build one external extension.
+type ExtSpec struct {
+	Name string
+	Repo string
+	Tag  string // pinned for reproducibility
+	// Build selects the build system; zero value is ExtBuildPGXS.
+	Build ExtBuildSystem
+	// Bootstrap runs in the checkout before ./configure (autotools only), e.g. {{"./autogen.sh"}}.
+	Bootstrap [][]string
+	// ConfigureArgs are extra ./configure flags (autotools only); --with-pgconfig is added automatically.
+	ConfigureArgs []string
+}
+
+// InstallExternalExtension clones spec.Repo@spec.Tag into b.ExternalDir, builds
+// it against this builder's from-source PostgreSQL (PGXS or autotools per
+// spec.Build) so the .so matches the cluster's ABI, installs it, and returns the
+// checkout dir. Must be called after Build().
+func (b *Builder) InstallExternalExtension(t *testing.T, ctx context.Context, spec ExtSpec) (string, error) {
 	t.Helper()
 
 	if err := os.MkdirAll(b.ExternalDir, 0o755); err != nil {
 		return "", fmt.Errorf("failed to create external dir: %w", err)
 	}
-	cloneDir := filepath.Join(b.ExternalDir, name)
+	cloneDir := filepath.Join(b.ExternalDir, spec.Name)
 
-	t.Logf("Cloning external extension %s (%s) from %s...", name, tag, repo)
+	t.Logf("Cloning external extension %s (%s) from %s...", spec.Name, spec.Tag, spec.Repo)
 	clone := executil.Command(ctx, "git", "clone",
 		"--depth=1",
-		"--branch", tag,
-		repo,
+		"--branch", spec.Tag,
+		spec.Repo,
 		cloneDir)
 	var stderr bytes.Buffer
 	clone.Stderr = &stderr
 	if err := clone.Run(); err != nil {
-		return "", fmt.Errorf("failed to clone %s: %w (stderr: %s)", name, err, stderr.String())
+		return "", fmt.Errorf("failed to clone %s: %w (stderr: %s)", spec.Name, err, stderr.String())
 	}
 
 	pgConfig := filepath.Join(b.BinDir(), "pg_config")
 
-	t.Logf("Building external extension %s with PGXS (PG_CONFIG=%s)...", name, pgConfig)
+	switch spec.Build {
+	case ExtBuildAutotools:
+		if err := b.buildExternalAutotools(t, ctx, spec, cloneDir, pgConfig); err != nil {
+			return "", err
+		}
+	default: // ExtBuildPGXS
+		if err := b.buildExternalPGXS(t, ctx, spec, cloneDir, pgConfig); err != nil {
+			return "", err
+		}
+	}
+
+	t.Logf("External extension %s installed", spec.Name)
+	return cloneDir, nil
+}
+
+// buildExternalPGXS builds and installs a PGXS module (make PG_CONFIG=...; make install).
+func (b *Builder) buildExternalPGXS(t *testing.T, ctx context.Context, spec ExtSpec, cloneDir, pgConfig string) error {
+	t.Helper()
+
+	t.Logf("Building external extension %s with PGXS (PG_CONFIG=%s)...", spec.Name, pgConfig)
 	makeCmd := executil.Command(ctx, "make", "-C", cloneDir, "-j", "4", "PG_CONFIG="+pgConfig)
 	makeCmd.Stdout = os.Stdout
 	makeCmd.Stderr = os.Stderr
 	if err := makeCmd.Run(); err != nil {
-		return "", fmt.Errorf("make %s failed: %w", name, err)
+		return fmt.Errorf("make %s failed: %w", spec.Name, err)
 	}
 
-	t.Logf("Installing external extension %s into %s...", name, b.InstallDir)
+	t.Logf("Installing external extension %s into %s...", spec.Name, b.InstallDir)
 	installCmd := executil.Command(ctx, "make", "-C", cloneDir, "PG_CONFIG="+pgConfig, "install")
 	installCmd.Stdout = os.Stdout
 	installCmd.Stderr = os.Stderr
 	if err := installCmd.Run(); err != nil {
-		return "", fmt.Errorf("make %s install failed: %w", name, err)
+		return fmt.Errorf("make %s install failed: %w", spec.Name, err)
+	}
+	return nil
+}
+
+// buildExternalAutotools runs Bootstrap, then ./configure --with-pgconfig, make, make install (e.g. PostGIS).
+func (b *Builder) buildExternalAutotools(t *testing.T, ctx context.Context, spec ExtSpec, cloneDir, pgConfig string) error {
+	t.Helper()
+
+	for _, argv := range spec.Bootstrap {
+		if len(argv) == 0 {
+			continue
+		}
+		t.Logf("Bootstrapping external extension %s: %s", spec.Name, strings.Join(argv, " "))
+		cmd := executil.Command(ctx, argv[0], argv[1:]...)
+		cmd.Dir = cloneDir
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("bootstrap %q for %s failed: %w", strings.Join(argv, " "), spec.Name, err)
+		}
 	}
 
-	t.Logf("External extension %s installed", name)
-	return cloneDir, nil
+	configureArgs := append([]string{"--with-pgconfig=" + pgConfig}, spec.ConfigureArgs...)
+	t.Logf("Configuring external extension %s: ./configure %s", spec.Name, strings.Join(configureArgs, " "))
+	configure := executil.Command(ctx, "./configure", configureArgs...)
+	configure.Dir = cloneDir
+	configure.Stdout = os.Stdout
+	configure.Stderr = os.Stderr
+	if err := configure.Run(); err != nil {
+		return fmt.Errorf("configure %s failed: %w", spec.Name, err)
+	}
+
+	t.Logf("Building external extension %s (make)...", spec.Name)
+	makeCmd := executil.Command(ctx, "make", "-C", cloneDir, "-j", "4")
+	makeCmd.Stdout = os.Stdout
+	makeCmd.Stderr = os.Stderr
+	if err := makeCmd.Run(); err != nil {
+		return fmt.Errorf("make %s failed: %w", spec.Name, err)
+	}
+
+	t.Logf("Installing external extension %s into %s...", spec.Name, b.InstallDir)
+	installCmd := executil.Command(ctx, "make", "-C", cloneDir, "install")
+	installCmd.Stdout = os.Stdout
+	installCmd.Stderr = os.Stderr
+	if err := installCmd.Run(); err != nil {
+		return fmt.Errorf("make %s install failed: %w", spec.Name, err)
+	}
+	return nil
 }
 
 // Cleanup removes per-invocation build and install artifacts but leaves the
