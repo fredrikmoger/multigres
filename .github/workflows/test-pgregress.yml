@@ -62,8 +62,9 @@ jobs:
           # libssl-dev is required for ./configure --with-ssl=openssl (pgcrypto, PG16+).
           # Both are enabled only when the contrib extension suite runs.
           # autoconf/pkg-config + GEOS/PROJ/libxml2/json-c build PostGIS from source (raster/protobuf disabled → no GDAL/protobuf-c).
+          # perl drives PostGIS's upstream regression suite (regress/run_test.pl).
           sudo apt-get install -y build-essential bison flex libreadline-dev zlib1g-dev uuid-dev libssl-dev \
-            autoconf pkg-config libgeos-dev libproj-dev libxml2-dev libjson-c-dev
+            autoconf pkg-config libgeos-dev libproj-dev libxml2-dev libjson-c-dev perl
 
       - name: Build
         run: make build

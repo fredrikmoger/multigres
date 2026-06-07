@@ -88,9 +88,22 @@ gateway.
   advances. Intended, benign diffs go under
   [patches/external/postgis/](../../go/test/endtoend/pgregresstest/testdata/pg17/patches/external/postgis/);
   a divergence that is a real proxy bug should be fixed in the gateway instead.
+- **Deep suite** ([postgis_suite.go](../../go/test/endtoend/pgregresstest/postgis_suite.go)):
+  PostGIS's _own_ regression suite, driven by its Perl harness
+  (`regress/run_test.pl`) rather than pg_regress. `run_test.pl --nocreate --nodrop
+--extensions` against the pre-existing `postgres` database connects purely
+  through libpq env vars, so the runner points it at **both** direct Postgres and
+  the gateway and reports only tests that pass directly but fail through the
+  gateway — isolating proxy regressions from upstream/version/platform noise
+  (which diffing against PostGIS's committed `_expected` alone would conflate).
+  Opt-in via `RUN_POSTGIS_CORE=1`; the 141 core tests are pure SQL. Loader/dumper
+  tests (which need the compiled shp2pgsql/pgsql2shp binaries) are gated behind
+  `RUN_POSTGIS_LOADER=1`. Reviewed-benign gateway diffs are recorded per test
+  under
+  [patches/external/postgis/](../../go/test/endtoend/pgregresstest/testdata/pg17/patches/external/postgis/).
 - **CI**: [test-pgregress.yml](../../.github/workflows/test-pgregress.yml)
   installs the PostGIS build deps (`autoconf pkg-config libgeos-dev libproj-dev
-libxml2-dev libjson-c-dev`).
+libxml2-dev libjson-c-dev`) and `perl` (for `run_test.pl`).
 
 ## Phase status
 
@@ -112,18 +125,27 @@ go test -v -run TestPostGIS ./go/test/endtoend/postgis/...
 # build deps from test-pgregress.yml):
 RUN_PGEXTERNAL=1 PGEXTERNAL_TESTS=postgis \
   go test -v -run TestPostgreSQLRegression ./go/test/endtoend/pgregresstest/...
+
+# Deep suite: PostGIS's own core regression tests via run_test.pl, run against
+# both direct PG and the gateway (gateway-induced failures only). Add
+# RUN_POSTGIS_LOADER=1 to also run the loader/dumper tests.
+RUN_PGEXTERNAL=1 PGEXTERNAL_TESTS=postgis RUN_POSTGIS_CORE=1 \
+  go test -v -run TestPostgreSQLRegression ./go/test/endtoend/pgregresstest/...
 ```
 
 ## Not yet covered / follow-ups
 
-- **PostGIS's full upstream regression suite.** It is Perl-driven
-  (`regress/run_test.pl`) with `@`-substitutions and loader fixtures, so it
-  isn't drop-in for the PGXS-style external runner. The curated suite covers the
-  core surface through the gateway; adapting the full upstream suite is a larger
-  follow-on and the highest-value way to widen Phase-3 coverage.
-- **Raster (`postgis_raster`) and `postgis_topology`** suites. Topology is
-  installed by the same build; raster is disabled (`--without-raster`) to avoid
-  the GDAL dependency. Both are out of scope for now.
+- **First triage pass of the deep suite.** The core suite (141 tests) is now
+  wired through `run_test.pl` (see Deep suite above), but it has not yet had a
+  full CI run to triage which tests — if any — fail only through the gateway.
+  That first run is the highest-value next step; any gateway-induced failures it
+  surfaces are either real proxy bugs to fix or reviewed-benign diffs to record
+  under `patches/external/postgis/`.
+- **Loader/dumper tests** are wired but gated (`RUN_POSTGIS_LOADER=1`) because
+  they need the compiled shp2pgsql/pgsql2shp binaries; they go through COPY,
+  which the gateway supports. Raster (`postgis_raster`) is disabled
+  (`--without-raster`) to avoid the GDAL dependency; `postgis_topology` is
+  installed by the same build but has no dedicated suite yet.
 - **Sharding.** This work makes PostGIS work behind a single-shard Multigres
   (pooling + HA for spatial workloads). Routing spatial queries across shards is
   a separate, much larger problem that does not exist in the codebase yet.

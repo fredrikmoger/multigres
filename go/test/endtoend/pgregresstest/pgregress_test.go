@@ -355,6 +355,25 @@ func TestPostgreSQLRegression(t *testing.T) {
 			if err != nil && results.TotalTests == 0 {
 				t.Fatalf("External test harness failed to execute: %v", err)
 			}
+
+			// Deep suite (opt-in, RUN_POSTGIS_CORE): PostGIS's own run_test.pl
+			// suite, direct vs gateway, counting only gateway-induced failures.
+			if PostGISCoreSuiteEnabled() {
+				cloneDir := filepath.Join(builder.ExternalDir, "postgis")
+				deep, derr := builder.RunPostGISCoreSuite(t, suiteCtx, cloneDir, setup.MultigatewayPgPort, directPgPort, shardsetup.TestPostgresPassword)
+				if deep != nil {
+					logSuiteResults(t, "PostGIS core", deep)
+					suites = append(suites, SuiteResult{
+						Name:    "PostGIS Core Regression",
+						Results: deep,
+					})
+					if deep.FailedTests > 0 {
+						t.Errorf("PostGIS core suite: %d gateway-induced failure(s)", deep.FailedTests)
+					}
+				} else if derr != nil {
+					t.Errorf("PostGIS core suite failed to run: %v", derr)
+				}
+			}
 		})
 	}
 
